@@ -6,6 +6,12 @@ import (
 	"os"
 )
 
+var (
+	FORKLIFT_CommandNotRecognized = "Error: Command %s not recognized.\n%s\n"
+	FORKLIFT_UsageString          = "Usage: forklift <cmd> [-b | -v] <image path>"
+	FORKLIFT_RunNoArgs            = "Error: No arguments specific for the 'run' command.\n%s\n"
+)
+
 type runFlagStruct struct {
 	backgroundFlag *bool
 	args           []string
@@ -25,7 +31,7 @@ func main() {
 
 	if len(os.Args) < 2 {
 		print_debug(*debugFlag, os.Args)
-		fmt.Printf("Error: Command not recognized.\nUsage: forklift <cmd> [-b | -v] <image path>")
+		fmt.Printf(FORKLIFT_CommandNotRecognized, os.Args[1], FORKLIFT_UsageString)
 		os.Exit(1)
 	}
 
@@ -33,6 +39,9 @@ func main() {
 	case "run":
 		runFlagSet.Parse(os.Args[2:])
 		runFlagCtx.args = runFlagSet.Args()
+		if len(runFlagCtx.args) < 1 {
+			fmt.Printf(FORKLIFT_RunNoArgs, FORKLIFT_UsageString)
+		}
 		runCmd(runFlagCtx)
 	default:
 		fmt.Printf("Error: Command %v not recognized.\nUsage: forklift <cmd> [-b | -v] <image path>", os.Args)
