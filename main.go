@@ -4,11 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 )
 
 var (
 	FORKLIFT_CommandNotRecognized = "Error: Command %s not recognized.\n%s\n"
-	FORKLIFT_UsageString          = "Usage: forklift <cmd> [-b | -v] <image path>"
+	FORKLIFT_UsageString          = "Usage: forklift <cmd> [-b | -v] <image path> <container exec>"
 	FORKLIFT_RunNoArgs            = "Error: No arguments specific for the 'run' command.\n%s\n"
 )
 
@@ -30,7 +31,6 @@ func main() {
 	debugFlag = runFlagSet.Bool("v", false, "Print verbose debug information.")
 
 	if len(os.Args) < 2 {
-		print_debug(*debugFlag, os.Args)
 		fmt.Printf(FORKLIFT_CommandNotRecognized, os.Args[1], FORKLIFT_UsageString)
 		os.Exit(1)
 	}
@@ -44,19 +44,34 @@ func main() {
 		}
 		runCmd(runFlagCtx)
 	default:
-		fmt.Printf("Error: Command %v not recognized.\nUsage: forklift <cmd> [-b | -v] <image path>", os.Args)
-		os.Exit(1)
+		fmt.Printf(FORKLIFT_CommandNotRecognized, os.Args[1], FORKLIFT_UsageString)
 	}
-
 }
 
 func runCmd(r runFlagStruct) {
-	print_debug(*debugFlag, r.args)
-	os.Exit(0)
+	printDebug(r.args)
+
+	execCommand := exec.Command(r.args[1], r.args[2:]...)
+	execCommand.Stdin = os.Stdin
+	execCommand.Stdout = os.Stdout
+	execCommand.Stderr = os.Stderr
+	/*
+		execCommand.SysProcAttr = &syscall.SysProcAttr{
+			Cloneflags: syscall.CLONE_NEWUTS,
+		}
+	*/
+
+	must(execCommand.Run())
 }
 
-func print_debug(cond bool, a any) {
-	if cond {
-		fmt.Println(a)
+func printDebug(a any) {
+	if *debugFlag {
+		fmt.Fprintln(os.Stderr, a)
+	}
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
 	}
 }
