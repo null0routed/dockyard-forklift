@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 )
 
 var (
@@ -22,12 +23,12 @@ var debugFlag *bool
 
 func main() {
 
-	runFlagCtx := runFlagStruct{
+	runCtx := runFlagStruct{
 		backgroundFlag: nil,
 	}
 
 	runFlagSet := flag.NewFlagSet("run", flag.ExitOnError)
-	runFlagCtx.backgroundFlag = runFlagSet.Bool("b", false, "Spawn the container as a background process.")
+	runCtx.backgroundFlag = runFlagSet.Bool("b", false, "Spawn the container as a background process.")
 	debugFlag = runFlagSet.Bool("v", false, "Print verbose debug information.")
 
 	if len(os.Args) < 2 {
@@ -38,11 +39,18 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		runFlagSet.Parse(os.Args[2:])
-		runFlagCtx.args = runFlagSet.Args()
-		if len(runFlagCtx.args) < 1 {
+		runCtx.args = runFlagSet.Args()
+		if len(runCtx.args) < 1 {
 			fmt.Printf(FORKLIFT_RunNoArgs, FORKLIFT_UsageString)
 		}
-		runCmd(runFlagCtx)
+		runCmd(runCtx)
+	case "child":
+		runFlagSet.Parse(os.Args[2:])
+		runCtx.args = runFlagSet.Args()
+		if len(runCtx.args) < 1 {
+			fmt.Printf(FORKLIFT_RunNoArgs, FORKLIFT_UsageString)
+		}
+		childCmd(runCtx)
 	default:
 		fmt.Printf(FORKLIFT_CommandNotRecognized, os.Args[1], FORKLIFT_UsageString)
 	}
@@ -51,17 +59,32 @@ func main() {
 func runCmd(r runFlagStruct) {
 	printDebug(r.args)
 
+	execCommand := exec.Command("/proc/self/exe", append([]string{"child"}, r.args[2:]...)...)
+	execCommand.Stdin = os.Stdin
+	execCommand.Stdout = os.Stdout
+	execCommand.Stderr = os.Stderr
+	execCommand.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC,
+	}
+
+	must(execCommand.Run())
+}
+
+func childCmd(r runFlagStruct) {
+	printDebug(r.args)
+
+	// Establish clean root to bind-mount on
+
 	execCommand := exec.Command(r.args[1], r.args[2:]...)
 	execCommand.Stdin = os.Stdin
 	execCommand.Stdout = os.Stdout
 	execCommand.Stderr = os.Stderr
-	/*
-		execCommand.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags: syscall.CLONE_NEWUTS,
-		}
-	*/
 
 	must(execCommand.Run())
+}
+
+func setupHostFileSystem() {
+
 }
 
 func printDebug(a any) {
