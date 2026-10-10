@@ -6,28 +6,36 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
+
+	"github.com/null0routed/dockyard-forklift/internal/archives"
 )
 
 var (
-	FORKLIFT_CommandNotRecognized = "Error: Command %s not recognized.\n%s\n"
-	FORKLIFT_CommandNotSpecified  = "Error: Command not specified.\n%s\n"
-	FORKLIFT_UsageString          = "Usage: forklift <cmd> [-b | -v] <image path> <container exec>"
-	FORKLIFT_RunNoArgs            = "Error: No arguments specific for the 'run' command.\n%s\n"
+	FORKLIFT_ErrCommandNotRecognized = "Error: Command %s not recognized.\n%s\n"
+	FORKLIFT_ErrCommandNotSpecified  = "Error: Command not specified.\n%s\n"
+	FORKLIFT_ErrUsageString          = "Usage: forklift <cmd> [-b | -v] <image path> <container exec>"
+	FORKLIFT_ErrRunNoArgs            = "Error: No arguments specific for the 'run' command.\n%s\n"
+	FORKLIFT_ErrCouldNotReadFile     = "Error: Unable to process image at %s.\n"
+	FORKLIFT_ErrCouldNotProcessImage = "Error: Image %s was not a valid image.\n"
 )
 
 var (
-	FORKLIFT_RUNTIME_BaseFSDir   = "/var/lib/forklift"
-	FORKLIFT_RUNTIME_ImagesFSDir = "images/"
+	FORKLIFT_RUNTIME_BaseFSDir       = "/var/lib/forklift"
+	FORKLIFT_RUNTIME_ImagesFSDir     = filepath.Join(FORKLIFT_RUNTIME_BaseFSDir, "images/")
+	FORKLIFT_RUNTIME_ContainersFSDir = filepath.Join(FORKLIFT_RUNTIME_BaseFSDir, "containers/")
 )
 
 type runtimeConfig struct {
-	Hostname           *string
-	ImagePath          *string
-	RuntimeBaseFSDir   *string
-	RuntimeImagesFSDir *string
-	BackgroundFlag     *bool
-	Args               []string
+	Hostname               *string
+	ImagePath              *string
+	ImageName              *string
+	RuntimeBaseFSDir       *string
+	RuntimeImagesFSDir     *string
+	RuntimeContainersFSDir *string
+	BackgroundFlag         *bool
+	Args                   []string
 }
 
 var debugFlag *bool
@@ -35,48 +43,55 @@ var debugFlag *bool
 func main() {
 
 	runCtx := runtimeConfig{
-		Hostname:           nil,
-		ImagePath:          nil,
-		RuntimeBaseFSDir:   nil,
-		RuntimeImagesFSDir: nil,
-		BackgroundFlag:     nil,
-		Args:               nil,
+		Hostname:               nil,
+		ImagePath:              nil,
+		RuntimeBaseFSDir:       nil,
+		RuntimeImagesFSDir:     nil,
+		RuntimeContainersFSDir: nil,
+		BackgroundFlag:         nil,
+		Args:                   nil,
 	}
 
-	runFlagSet := flag.NewFlagSet("run", flag.ExitOnError)
-	runCtx.BackgroundFlag = runFlagSet.Bool("b", false, "Spawn the container as a background process.")
-	runCtx.Hostname = runFlagSet.String("h", "defaultcontainer", "The hostname or name of the container.")
-	debugFlag = runFlagSet.Bool("v", false, "Print verbose debug information.")
+	upFlagSet := flag.NewFlagSet("up", flag.ExitOnError)
+	runCtx.BackgroundFlag = upFlagSet.Bool("b", false, "Spawn the container as a background process.")
+	runCtx.Hostname = upFlagSet.String("h", "defaultcontainer", "The hostname or name of the container.")
+	runCtx.RuntimeBaseFSDir = upFlagSet.String("base-dir", FORKLIFT_RUNTIME_BaseFSDir, "The base directory for forklift.")
+	runCtx.RuntimeImagesFSDir = upFlagSet.String("images-dir", FORKLIFT_RUNTIME_ImagesFSDir, "The directory to store local container images.")
+	runCtx.RuntimeContainersFSDir = upFlagSet.String("containers-dir", FORKLIFT_RUNTIME_ContainersFSDir, "The directory to store active container mounts.")
+	debugFlag = upFlagSet.Bool("v", false, "Print verbose debug information.")
 
 	if len(os.Args) < 2 {
-		fmt.Printf(FORKLIFT_CommandNotSpecified, FORKLIFT_UsageString)
+		fmt.Printf(FORKLIFT_ErrCommandNotSpecified, FORKLIFT_ErrUsageString)
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
 	case "run":
-		runFlagSet.Parse(os.Args[2:])
-		runCtx.Args = runFlagSet.Args()
+		upFlagSet.Parse(os.Args[2:])
+		runCtx.Args = upFlagSet.Args()
 		if len(runCtx.Args) < 1 {
-			fmt.Printf(FORKLIFT_RunNoArgs, FORKLIFT_UsageString)
+			fmt.Printf(FORKLIFT_ErrRunNoArgs, FORKLIFT_ErrUsageString)
 		}
-		runCmd(runCtx)
+		upCmd(runCtx)
 	case "child":
-		runFlagSet.Parse(os.Args[2:])
-		runCtx.Args = runFlagSet.Args()
+		upFlagSet.Parse(os.Args[2:])
+		runCtx.Args = upFlagSet.Args()
 		if len(runCtx.Args) < 1 {
-			fmt.Printf(FORKLIFT_RunNoArgs, FORKLIFT_UsageString)
+			fmt.Printf(FORKLIFT_ErrRunNoArgs, FORKLIFT_ErrUsageString)
 			os.Exit(1)
 		}
 		childCmd(runCtx)
 	default:
-		fmt.Printf(FORKLIFT_CommandNotRecognized, os.Args[1], FORKLIFT_UsageString)
+		fmt.Printf(FORKLIFT_ErrCommandNotRecognized, os.Args[1], FORKLIFT_ErrUsageString)
 		os.Exit(1)
 	}
 }
 
-func runCmd(r runtimeConfig) {
+func upCmd(r runtimeConfig) {
 	printDebug(r.Args)
+
+	// Prepare host file system
+	must(setupHostFileSystem(r))
 
 	execCommand := exec.Command("/proc/self/exe", append([]string{"child"}, r.Args...)...)
 	execCommand.Stdin = os.Stdin
@@ -101,9 +116,6 @@ func runCmd(r runtimeConfig) {
 		GidMappingsEnableSetgroups: false,
 	}
 
-	// Prepare host file system
-	must(setupHostFileSystem(r))
-
 	must(execCommand.Run())
 }
 
@@ -112,7 +124,11 @@ func childCmd(r runtimeConfig) {
 
 	// Set hostname
 	must(syscall.Sethostname([]byte(*r.Hostname)))
-	// Establish clean root to bind-mount on
+
+	// Stop propagation of mounts to host and establish private mounts
+	must(syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""))
+
+	// Build local mount
 
 	execCommand := exec.Command(r.Args[1], r.Args[2:]...)
 	execCommand.Stdin = os.Stdin
@@ -124,16 +140,67 @@ func childCmd(r runtimeConfig) {
 
 func setupHostFileSystem(r runtimeConfig) error {
 
-	must(validateFilePath(*r.RuntimeBaseFSDir, *r.RuntimeImagesFSDir))
+	// File path for downloaded images
+	must(checkOrBuildFilePath(*r.RuntimeImagesFSDir))
+
+	// File path for where running container mounts live
+	must(checkOrBuildFilePath(*r.RuntimeContainersFSDir))
+
+	// Validate image is .tar.gz or a directory in the runtime path
+	if strings.HasSuffix(*r.ImagePath, ".tar.gz") || strings.HasSuffix(*r.ImagePath, ".tgz") {
+		// Ungzip to tmp
+		imageName := filepath.Base(*r.ImagePath)
+		targetPath := ""
+
+		if strings.HasSuffix(imageName, ".tar.gz") {
+			imageName = strings.TrimSuffix(imageName, ".tar.gz")
+		} else if strings.HasSuffix(imageName, ".tgz") {
+			imageName = strings.TrimSuffix(imageName, ".tgz")
+		}
+		targetPath = filepath.Join("/tmp", imageName, ".tar")
+
+		must(archives.UnGzip(*r.ImagePath, targetPath))
+
+		must(archives.Untar(targetPath, filepath.Join(*r.RuntimeImagesFSDir, imageName)))
+
+		r.ImageName = &imageName
+	} else {
+		fileinfo, err := os.Stat(*r.ImagePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, FORKLIFT_ErrCouldNotReadFile, *r.ImagePath)
+			os.Exit(1)
+		}
+
+		if fileinfo.IsDir() {
+			// Check if its in image folder
+			if !strings.HasPrefix(*r.ImagePath, *r.RuntimeImagesFSDir) {
+				fmt.Fprintf(os.Stderr, FORKLIFT_ErrCouldNotProcessImage, *r.ImagePath)
+				os.Exit(1)
+			}
+
+			imageName := filepath.Base(*r.ImagePath)
+			r.ImageName = &imageName
+			return nil
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, FORKLIFT_ErrCouldNotProcessImage, *r.ImagePath)
+	os.Exit(1)
 	return nil
 }
 
-func validateFilePath(paths ...string) error {
+func setupContainerFS(r runtimeConfig) error {
+	return nil
+}
+
+func checkOrBuildFilePath(paths ...string) error {
 	fullPath := filepath.Join(paths...)
 	_, err := os.ReadDir(fullPath)
 	if err != nil {
 		return os.MkdirAll(fullPath, 0755)
 	}
+
+	return nil
 }
 
 func printDebug(a any) {
